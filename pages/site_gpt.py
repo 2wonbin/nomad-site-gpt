@@ -7,19 +7,50 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores.faiss import FAISS
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.schema.runnable import RunnablePassthrough, RunnableLambda
+from langchain.callbacks.base import BaseCallbackHandler
 
 st.set_page_config(
     page_title="SiteGPT",
     page_icon="🖥️",
 )
 
+
+class ChatCallbackHandler(BaseCallbackHandler):
+    message = ""
+
+    def on_llm_start(self, *args, **kwargs):
+        self.message_box = st.empty()
+
+    def on_llm_end(self, *args, **kwargs):
+        save_message(self.message, "ai")
+
+
+with st.sidebar:
+    st.link_button(
+        "Github로 이동",
+        url="https://github.com/2wonbin/nomad-site-gpt",
+        help="해당 프로젝트의 깃허브 레포지토리로 이동합니다.",
+        use_container_width=True,
+    )
 api_key = ""
 with st.sidebar:
     api_key = st.text_input(
         "OpenAI API Key",
+        placeholder="OpenAI API Key를 입력하세요",
     )
+if api_key == "":
+    st.error("OpenAI API Key를 입력하세요.")
+    st.stop()
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, openai_api_key=api_key)
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.1,
+    openai_api_key=api_key,
+    streaming=True,
+    callbacks=[
+        ChatCallbackHandler(),
+    ],
+)
 
 answers_prompt = ChatPromptTemplate.from_template(
     """
@@ -125,45 +156,77 @@ def load_website(url):
     return vector_store.as_retriever()
 
 
+def send_message(message, role, save=True):
+    with st.chat_message(role):
+        st.markdown(message)
+    if save:
+        save_message(message, role)
+
+
+def save_message(message, role):
+    st.session_state["messages"].append({"message": message, "role": role})
+
+
+def paint_history():
+    for message in st.session_state["messages"]:
+        if message["message"] == "":
+            continue
+        send_message(
+            message["message"],
+            message["role"],
+            save=False,
+        )
+
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+
+
 st.markdown(
     """
     # SiteGPT
             
-    Ask questions about the content of a website.
-            
-    Start by writing the URL of the website on the sidebar.
+    이 페이지는은 OpenAI의 모델을 사용하여 웹사이트의 Sitemap을 통해 정보를 얻을 수 있습니다.
+    Sitemap URL을 입력하고 질문을 입력하면 해당 질문에 대한 답변을 얻을 수 있습니다.
 """
 )
 
-user_question = st.text_input(
-    "Ask a question",
-    placeholder="How much does it cost?",
-)
 
 url = ""
-with st.sidebar:
-    url = st.text_input(
-        "Write down a URL",
-        placeholder="https://example.com",
-    )
+if api_key != "":
+    with st.sidebar:
+        url = st.text_input(
+            "정보를 얻고 싶은 사이트의 Sitemap URL을 입력하세요.",
+            placeholder="https://example.com",
+        )
 
 
 if url != "":
     if ".xml" not in url:
         with st.sidebar:
-            st.error("Please write down a Sitemap URL.")
+            st.error("파일 형식이 올바르지 않습니다. xml 파일을 입력하세요.")
     else:
         retriever = load_website(url)
 
-        chain = (
-            {
-                "docs": retriever,
-                "question": RunnablePassthrough(),
-            }
-            | RunnableLambda(get_answers)
-            | RunnableLambda(choose_answer)
-        )
+    send_message("사이트 분석이 끝났습니다. 궁금한게 있으신가요?", "ai", save=False)
+    paint_history()
 
-        result = chain.invoke(user_question)
+    user_question = st.chat_input("사이트에 대해 궁금한게 있으면 물어보세요.")
+    if user_question:
+        send_message(user_question, "human")
 
-st.markdown(f"**Question:** {result.content}")
+        chain = {
+            "docs": retriever,
+            "question": RunnablePassthrough(),
+        } | RunnableLambda(get_answers)
+
+        final_chain = chain | RunnableLambda(choose_answer)
+
+        with st.spinner("답변을 찾는 중입니다..."):
+            response = final_chain.invoke(user_question)
+            result = response.content
+            send_message(result, "ai")
+
+else:
+    st.error("Sitemap URL을 입력하세요.")
+    st.session_state["messages"] = []
